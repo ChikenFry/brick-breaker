@@ -1,198 +1,159 @@
 /**
- * server.js — Brick Breaker Multiplayer Server
- * Server-authoritative model: physics run here, state broadcast at 60fps.
+ * server.js — Brick Breaker Multiplayer (Mobile-Ready)
+ * Server-authoritative: physics run here, state broadcast at 60fps.
+ * Render.com free tier compatible.
  */
 
-const express = require('express');
-const http    = require('http');
-const { Server } = require('socket.io');
-const path    = require('path');
+const express        = require('express');
+const http           = require('http');
+const { Server }     = require('socket.io');
+const path           = require('path');
 
-// ─── Express + HTTP + Socket.IO Setup ────────────────────────────────────────
+// ── App Setup ────────────────────────────────────────────────────────────────
 const app    = express();
 const server = http.createServer(app);
-const io     = new Server(server, { cors: { origin: '*' } });
+const io     = new Server(server, {
+  cors: { origin: '*' },
+  // Prefer websocket first; polling as fallback for restricted mobile networks
+  transports: ['websocket', 'polling']
+});
 
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Render.com requires binding to process.env.PORT
 const PORT = process.env.PORT || 3000;
 
-// ─── Game Constants ───────────────────────────────────────────────────────────
-const CANVAS_W     = 800;
-const CANVAS_H     = 600;
-const BALL_RADIUS  = 8;
-const BALL_SPEED   = 5;          // pixels per tick
-const PADDLE_H     = 12;
-const PADDLE_W     = 100;
-const BRICK_ROWS   = 3;
-const BRICK_COLS   = 10;
-const BRICK_W      = 70;
-const BRICK_H      = 20;
-const BRICK_PAD    = 6;
-const BRICK_TOP    = 50;         // y offset for brick grid
-const PADDLE_Y_BASE = CANVAS_H - 40; // y position for all paddles
+// ── Game Constants ───────────────────────────────────────────────────────────
+// 400x600 logical units — client scales to fit any screen size
+const W          = 400;
+const H          = 600;
+const BALL_R     = 7;
+const BALL_SPEED = 4.5;
+const PAD_W      = 80;
+const PAD_H      = 10;
+const PAD_Y      = H - 36;
+const BRICK_COLS = 8;
+const BRICK_ROWS = 4;
+const BRICK_W    = Math.floor((W - 20) / BRICK_COLS) - 4;
+const BRICK_H    = 16;
+const BRICK_PAD  = 4;
+const BRICK_TOP  = 44;
 
-// ─── Game State ───────────────────────────────────────────────────────────────
-let players = {};  // { socketId: { id, paddleX, color, name } }
-let ball    = resetBall();
-let bricks  = buildBricks();
-let scores  = {};  // { socketId: number }
+// ── Player Colors ────────────────────────────────────────────────────────────
+const COLORS = ['#e63946', '#2a9d8f', '#e9c46a', '#457b9d', '#f4a261', '#a8dadc'];
+let colorIdx = 0;
 
-/** Build a fresh grid of bricks */
-function buildBricks() {
-  const grid = [];
+// ── State ────────────────────────────────────────────────────────────────────
+let players = {};
+let scores  = {};
+let ball    = spawnBall();
+let bricks  = makeBricks();
+
+function makeBricks() {
+  const list = [];
   for (let r = 0; r < BRICK_ROWS; r++) {
     for (let c = 0; c < BRICK_COLS; c++) {
-      grid.push({
-        x:      c * (BRICK_W + BRICK_PAD) + BRICK_PAD + 20,
-        y:      r * (BRICK_H + BRICK_PAD) + BRICK_TOP,
-        w:      BRICK_W,
-        h:      BRICK_H,
-        alive:  true,
-        row:    r   // row used for color tinting on client
+      list.push({
+        x: 10 + c * (BRICK_W + BRICK_PAD),
+        y: BRICK_TOP + r * (BRICK_H + BRICK_PAD),
+        w: BRICK_W,
+        h: BRICK_H,
+        alive: true,
+        row: r
       });
     }
   }
-  return grid;
+  return list;
 }
 
-/** Reset the ball to center with a random downward angle */
-function resetBall() {
-  const angle = (Math.random() * 60 + 60) * (Math.PI / 180); // 60°–120° downward
+function spawnBall() {
+  const a = ((50 + Math.random() * 80) * Math.PI) / 180;
   return {
-    x:  CANVAS_W / 2,
-    y:  CANVAS_H / 2,
-    vx: Math.cos(angle) * BALL_SPEED * (Math.random() < 0.5 ? 1 : -1),
-    vy: Math.sin(angle) * BALL_SPEED
+    x:  W / 2,
+    y:  H / 2,
+    vx: Math.cos(a) * BALL_SPEED * (Math.random() < 0.5 ? 1 : -1),
+    vy: Math.sin(a) * BALL_SPEED
   };
 }
 
-// ─── Physics Tick ─────────────────────────────────────────────────────────────
+// ── Physics ──────────────────────────────────────────────────────────────────
 function tick() {
-  if (Object.keys(players).length === 0) return; // pause when no players
+  if (Object.keys(players).length === 0) return;
 
-  // Move ball
   ball.x += ball.vx;
   ball.y += ball.vy;
 
-  // Wall bounce (left / right)
-  if (ball.x - BALL_RADIUS <= 0) {
-    ball.x = BALL_RADIUS;
-    ball.vx = Math.abs(ball.vx);
-  } else if (ball.x + BALL_RADIUS >= CANVAS_W) {
-    ball.x = CANVAS_W - BALL_RADIUS;
-    ball.vx = -Math.abs(ball.vx);
-  }
+  // Walls
+  if (ball.x - BALL_R <= 0) { ball.x = BALL_R;     ball.vx =  Math.abs(ball.vx); }
+  if (ball.x + BALL_R >= W) { ball.x = W - BALL_R; ball.vx = -Math.abs(ball.vx); }
+  if (ball.y - BALL_R <= 0) { ball.y = BALL_R;     ball.vy =  Math.abs(ball.vy); }
 
-  // Ceiling bounce
-  if (ball.y - BALL_RADIUS <= 0) {
-    ball.y = BALL_RADIUS;
-    ball.vy = Math.abs(ball.vy);
-  }
-
-  // Brick collision
-  for (const brick of bricks) {
-    if (!brick.alive) continue;
-    if (
-      ball.x + BALL_RADIUS > brick.x &&
-      ball.x - BALL_RADIUS < brick.x + brick.w &&
-      ball.y + BALL_RADIUS > brick.y &&
-      ball.y - BALL_RADIUS < brick.y + brick.h
-    ) {
-      brick.alive = false;
+  // Bricks
+  for (const b of bricks) {
+    if (!b.alive) continue;
+    if (ball.x+BALL_R > b.x && ball.x-BALL_R < b.x+b.w &&
+        ball.y+BALL_R > b.y && ball.y-BALL_R < b.y+b.h) {
+      b.alive = false;
       ball.vy = -ball.vy;
-
-      // Award point to all players equally (or pick closest paddle — kept minimal)
       for (const id in scores) scores[id]++;
-
-      // Rebuild bricks if all cleared
-      if (bricks.every(b => !b.alive)) {
-        bricks = buildBricks();
-        io.emit('message', '🎉 All bricks cleared! New round!');
-      }
-      break; // one brick per tick
+      if (bricks.every(b => !b.alive)) { bricks = makeBricks(); io.emit('msg', 'All cleared!'); }
+      break;
     }
   }
 
-  // Paddle collision — check every player's paddle
+  // Paddles
   for (const id in players) {
     const p = players[id];
-    const px = p.paddleX;
-    const py = PADDLE_Y_BASE;
-
-    if (
-      ball.vy > 0 &&                              // moving downward
-      ball.y + BALL_RADIUS >= py &&
-      ball.y + BALL_RADIUS <= py + PADDLE_H + 4 && // small tolerance
-      ball.x >= px &&
-      ball.x <= px + PADDLE_W
-    ) {
-      // Angle the reflect based on hit position relative to paddle center
-      const hitPos  = (ball.x - (px + PADDLE_W / 2)) / (PADDLE_W / 2); // -1 to 1
-      const angle   = hitPos * (Math.PI / 3); // max 60° deflection
-      const speed   = Math.hypot(ball.vx, ball.vy);
-      ball.vx = Math.sin(angle) * speed;
-      ball.vy = -Math.abs(Math.cos(angle) * speed);
-      ball.y  = py - BALL_RADIUS - 1; // pop out of paddle
+    if (ball.vy > 0 &&
+        ball.y+BALL_R >= PAD_Y && ball.y+BALL_R <= PAD_Y+PAD_H+6 &&
+        ball.x >= p.paddleX   && ball.x <= p.paddleX+PAD_W) {
+      const offset = (ball.x - (p.paddleX + PAD_W/2)) / (PAD_W/2);
+      const angle  = offset * (Math.PI / 3);
+      const spd    = Math.hypot(ball.vx, ball.vy);
+      ball.vx = Math.sin(angle) * spd;
+      ball.vy = -Math.abs(Math.cos(angle) * spd);
+      ball.y  = PAD_Y - BALL_R - 1;
+      break;
     }
   }
 
-  // Ball fell below paddle line → reset
-  if (ball.y - BALL_RADIUS > CANVAS_H) {
-    ball = resetBall();
-    io.emit('message', '💥 Ball lost! Resetting…');
-  }
+  // Reset
+  if (ball.y - BALL_R > H) { ball = spawnBall(); io.emit('msg', 'Ball lost!'); }
 }
 
-// ─── Game Loop at 60fps ───────────────────────────────────────────────────────
+// ── Game Loop ────────────────────────────────────────────────────────────────
 setInterval(() => {
   tick();
-
-  io.emit('state', {
-    ball,
-    players,   // { id: { paddleX, color, name } }
-    bricks,
-    scores
-  });
+  io.emit('s', { ball, players, bricks, scores });
 }, 1000 / 60);
 
-// ─── Socket.IO Events ─────────────────────────────────────────────────────────
-const PLAYER_COLORS = ['#00f5d4', '#f72585', '#fee440', '#4cc9f0', '#b5179e', '#3a86ff'];
-let colorIndex = 0;
-
-io.on('connection', (socket) => {
-  console.log(`[+] Player connected: ${socket.id}`);
-
-  // Assign player a paddle starting at center
+// ── Sockets ───────────────────────────────────────────────────────────────────
+io.on('connection', socket => {
+  console.log('[+]', socket.id);
+  const num = Object.keys(players).length + 1;
   players[socket.id] = {
-    id:      socket.id,
-    paddleX: CANVAS_W / 2 - PADDLE_W / 2,
-    color:   PLAYER_COLORS[colorIndex++ % PLAYER_COLORS.length],
-    name:    `P${Object.keys(players).length}`
+    id: socket.id,
+    paddleX: W/2 - PAD_W/2,
+    color: COLORS[colorIdx++ % COLORS.length],
+    name: 'P' + num
   };
   scores[socket.id] = 0;
 
-  // Send the new player their own ID + current bricks
-  socket.emit('init', { playerId: socket.id, bricks, CANVAS_W, CANVAS_H });
-  io.emit('message', `${players[socket.id].name} joined!`);
+  // Send constants so client renders in correct coordinate space
+  socket.emit('init', { id: socket.id, W, H, PAD_W, PAD_H, PAD_Y, BALL_R });
+  io.emit('msg', players[socket.id].name + ' joined');
 
-  // Client sends its paddle X position
-  socket.on('paddleMove', (x) => {
-    if (!players[socket.id]) return;
-    // Clamp to canvas bounds
-    players[socket.id].paddleX = Math.max(0, Math.min(CANVAS_W - PADDLE_W, x));
+  socket.on('p', x => {
+    if (players[socket.id])
+      players[socket.id].paddleX = Math.max(0, Math.min(W - PAD_W, x));
   });
 
   socket.on('disconnect', () => {
-    console.log(`[-] Player disconnected: ${socket.id}`);
     const name = players[socket.id]?.name;
     delete players[socket.id];
     delete scores[socket.id];
-    if (name) io.emit('message', `${name} left.`);
+    if (name) io.emit('msg', name + ' left');
   });
 });
 
-// ─── Start Server ─────────────────────────────────────────────────────────────
-server.listen(PORT, () => {
-  console.log(`✅ Brick Breaker server running → http://localhost:${PORT}`);
-});
+server.listen(PORT, () => console.log('Listening on', PORT));

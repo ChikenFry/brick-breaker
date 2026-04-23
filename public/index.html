@@ -1,342 +1,173 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Brick Breaker — Multiplayer</title>
-  <style>
-    /* ── Reset & Base ───────────────────────────────────────────── */
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-    body {
-      background: #0a0a12;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      font-family: 'Courier New', monospace;
-      color: #e0e0e0;
-      overflow: hidden;
-    }
-
-    /* ── Title ──────────────────────────────────────────────────── */
-    h1 {
-      font-size: 1.1rem;
-      letter-spacing: 0.35em;
-      text-transform: uppercase;
-      color: #00f5d4;
-      margin-bottom: 10px;
-      text-shadow: 0 0 18px #00f5d480;
-    }
-
-    /* ── Canvas wrapper + scanline overlay ─────────────────────── */
-    #wrapper {
-      position: relative;
-      border: 1px solid #00f5d430;
-      box-shadow: 0 0 40px #00f5d415, inset 0 0 60px #00000060;
-    }
-
-    canvas {
-      display: block;
-      background: #0d0d1a;
-    }
-
-    /* CRT scanline effect */
-    #wrapper::after {
-      content: '';
-      position: absolute;
-      inset: 0;
-      background: repeating-linear-gradient(
-        to bottom,
-        transparent 0px,
-        transparent 2px,
-        rgba(0,0,0,0.08) 2px,
-        rgba(0,0,0,0.08) 4px
-      );
-      pointer-events: none;
-    }
-
-    /* ── HUD bar ────────────────────────────────────────────────── */
-    #hud {
-      display: flex;
-      gap: 24px;
-      margin-top: 10px;
-      font-size: 0.75rem;
-      letter-spacing: 0.1em;
-      color: #888;
-    }
-
-    #hud span { color: #00f5d4; }
-
-    /* ── Toast messages ─────────────────────────────────────────── */
-    #toast {
-      position: fixed;
-      bottom: 24px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: rgba(0,245,212,0.12);
-      border: 1px solid #00f5d430;
-      color: #00f5d4;
-      padding: 6px 20px;
-      font-size: 0.8rem;
-      letter-spacing: 0.08em;
-      border-radius: 2px;
-      opacity: 0;
-      transition: opacity 0.3s;
-      pointer-events: none;
-    }
-    #toast.show { opacity: 1; }
-  </style>
+<meta charset="UTF-8">
+<!--
+  viewport: width=device-width stops mobile browsers from zooming out.
+  user-scalable=no prevents pinch-zoom interfering with touch paddle control.
+-->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Brick Breaker</title>
+<style>
+/* Zero-CSS goal: only layout essentials — no decorative styles at all */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #111; display: flex; flex-direction: column; align-items: center; touch-action: none; }
+canvas { display: block; }
+#msg { color: #fff; font: 13px monospace; height: 20px; text-align: center; padding-top: 3px; }
+</style>
 </head>
 <body>
 
-  <h1>⬛ Brick Breaker — Multiplayer</h1>
+<canvas id="c"></canvas>
+<div id="msg"></div>
 
-  <div id="wrapper">
-    <canvas id="canvas"></canvas>
-  </div>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+// ── Canvas + scaling ──────────────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
 
-  <div id="hud">
-    YOU: <span id="hud-you">—</span>
-    &nbsp;|&nbsp;
-    PLAYERS: <span id="hud-players">0</span>
-    &nbsp;|&nbsp;
-    SCORE: <span id="hud-score">0</span>
-  </div>
+// Logical game dimensions — filled in by server 'init' event
+let LW = 400, LH = 600;   // logical width / height
+let PAD_W = 80, PAD_H = 10, PAD_Y = 564, BALL_R = 7;
 
-  <div id="toast" id="toast"></div>
+// scale = CSS pixels per logical unit; recomputed on resize
+let scale = 1;
 
-  <!-- Socket.IO client (served automatically by socket.io) -->
-  <script src="/socket.io/socket.io.js"></script>
+function resize() {
+  // Fit the canvas into the available viewport width, preserving aspect ratio.
+  // Leave 24px for the message bar below.
+  const maxW = window.innerWidth;
+  const maxH = window.innerHeight - 24;
+  scale = Math.min(maxW / LW, maxH / LH);
 
-  <script>
-    // ─── Canvas Setup ──────────────────────────────────────────────────────────
-    const canvas = document.getElementById('canvas');
-    const ctx    = canvas.getContext('2d');
+  canvas.width  = Math.floor(LW * scale);
+  canvas.height = Math.floor(LH * scale);
+}
 
-    // Game constants (mirrored from server; server will also send these on init)
-    let CANVAS_W = 800;
-    let CANVAS_H = 600;
+window.addEventListener('resize', resize);
+resize();
 
-    canvas.width  = CANVAS_W;
-    canvas.height = CANVAS_H;
+// ── Socket ────────────────────────────────────────────────────────────────────
+const socket = io({ transports: ['websocket', 'polling'] });
 
-    // Game constants (must match server.js)
-    const BALL_RADIUS  = 8;
-    const PADDLE_H     = 12;
-    const PADDLE_W     = 100;
-    const PADDLE_Y     = CANVAS_H - 40;
+let myId  = null;
+let state = null;
 
-    // ─── State ─────────────────────────────────────────────────────────────────
-    let myId    = null;   // this client's socket ID
-    let state   = null;   // latest game state from server
-    let lastX   = null;   // last sent paddleX (to avoid redundant emits)
+socket.on('init', data => {
+  myId  = data.id;
+  LW    = data.W;
+  LH    = data.H;
+  PAD_W = data.PAD_W;
+  PAD_H = data.PAD_H;
+  PAD_Y = data.PAD_Y;
+  BALL_R = data.BALL_R;
+  resize();   // re-scale now we know real dimensions
+});
 
-    // ─── Socket.IO Connection ──────────────────────────────────────────────────
-    const socket = io();
+// 's' = compact state event (keeps payload name short)
+socket.on('s', s => { state = s; });
 
-    /** Server assigns us our ID and initial bricks */
-    socket.on('init', ({ playerId, CANVAS_W: cw, CANVAS_H: ch }) => {
-      myId = playerId;
-      CANVAS_W = cw;
-      CANVAS_H = ch;
-      canvas.width  = CANVAS_W;
-      canvas.height = CANVAS_H;
-      document.getElementById('hud-you').textContent = `P${Object.keys({}).length}`;
-    });
+// Toast message
+let msgTimer;
+socket.on('msg', txt => {
+  const el = document.getElementById('msg');
+  el.textContent = txt;
+  clearTimeout(msgTimer);
+  msgTimer = setTimeout(() => { el.textContent = ''; }, 2500);
+});
 
-    /** Main game state broadcast — arrives ~60 times/sec */
-    socket.on('state', (s) => {
-      state = s;
+// ── Paddle input ──────────────────────────────────────────────────────────────
+// Convert a CSS-pixel x position into a logical paddle X and emit it.
+function sendPaddle(cssX) {
+  // Convert CSS pixel → logical coordinate
+  const logicalX = cssX / scale - PAD_W / 2;
+  socket.emit('p', Math.max(0, Math.min(LW - PAD_W, logicalX)));
+}
 
-      // Update HUD
-      const playerCount = Object.keys(s.players).length;
-      document.getElementById('hud-players').textContent = playerCount;
-      if (myId && s.scores[myId] !== undefined) {
-        document.getElementById('hud-score').textContent = s.scores[myId];
-      }
-      if (myId && s.players[myId]) {
-        document.getElementById('hud-you').textContent = s.players[myId].name;
-      }
-    });
+// Mouse (desktop fallback)
+canvas.addEventListener('mousemove', e => {
+  const r = canvas.getBoundingClientRect();
+  sendPaddle(e.clientX - r.left);
+});
 
-    /** Toast notification messages from server */
-    socket.on('message', showToast);
+// Touch — use first active touch point
+canvas.addEventListener('touchstart',  handleTouch, { passive: false });
+canvas.addEventListener('touchmove',   handleTouch, { passive: false });
 
-    // ─── Paddle Input ──────────────────────────────────────────────────────────
-    /** Send paddle position when mouse moves over the canvas */
-    canvas.addEventListener('mousemove', (e) => {
-      const rect = canvas.getBoundingClientRect();
-      // Map mouse x to canvas coordinates (handles CSS scaling if any)
-      const scaleX = CANVAS_W / rect.width;
-      const x = (e.clientX - rect.left) * scaleX - PADDLE_W / 2;
-      const clamped = Math.max(0, Math.min(CANVAS_W - PADDLE_W, x));
-      if (clamped !== lastX) {
-        socket.emit('paddleMove', clamped);
-        lastX = clamped;
-      }
-    });
+function handleTouch(e) {
+  e.preventDefault();   // stop scroll / zoom interference
+  const r     = canvas.getBoundingClientRect();
+  const touch = e.touches[0];
+  sendPaddle(touch.clientX - r.left);
+}
 
-    /** Touch support for mobile */
-    canvas.addEventListener('touchmove', (e) => {
-      e.preventDefault();
-      const rect  = canvas.getBoundingClientRect();
-      const scaleX = CANVAS_W / rect.width;
-      const x = (e.touches[0].clientX - rect.left) * scaleX - PADDLE_W / 2;
-      const clamped = Math.max(0, Math.min(CANVAS_W - PADDLE_W, x));
-      socket.emit('paddleMove', clamped);
-    }, { passive: false });
+// ── Brick row colours (simple, no glow) ──────────────────────────────────────
+const BRICK_COLORS = ['#e63946', '#e9c46a', '#2a9d8f', '#457b9d'];
 
-    // ─── Rendering ─────────────────────────────────────────────────────────────
+// ── Render loop ───────────────────────────────────────────────────────────────
+function draw() {
+  requestAnimationFrame(draw);
 
-    /** Brick row → color palette (neon arcade feel) */
-    const BRICK_COLORS = ['#f72585', '#7209b7', '#4361ee'];
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    /** Draw a single brick with glow */
-    function drawBrick(brick) {
-      if (!brick.alive) return;
-      const color = BRICK_COLORS[brick.row % BRICK_COLORS.length];
-      ctx.save();
-      ctx.shadowColor = color;
-      ctx.shadowBlur  = 8;
-      ctx.fillStyle   = color + '33'; // semi-transparent fill
-      ctx.strokeStyle = color;
-      ctx.lineWidth   = 1.5;
-      ctx.fillRect(brick.x, brick.y, brick.w, brick.h);
-      ctx.strokeRect(brick.x + 0.75, brick.y + 0.75, brick.w - 1.5, brick.h - 1.5);
-      ctx.restore();
-    }
+  if (!state) {
+    // Waiting for first state packet
+    ctx.fillStyle = '#555';
+    ctx.font = `${14 * scale}px monospace`;
+    ctx.textAlign = 'center';
+    ctx.fillText('Connecting...', canvas.width / 2, canvas.height / 2);
+    return;
+  }
 
-    /** Draw the ball with a neon glow trail */
-    function drawBall(ball) {
-      ctx.save();
-      // Outer glow
-      ctx.shadowColor = '#00f5d4';
-      ctx.shadowBlur  = 20;
-      ctx.beginPath();
-      ctx.arc(ball.x, ball.y, BALL_RADIUS, 0, Math.PI * 2);
-      ctx.fillStyle = '#00f5d4';
-      ctx.fill();
-      // Inner bright core
-      ctx.shadowBlur  = 6;
-      ctx.beginPath();
-      ctx.arc(ball.x, ball.y, BALL_RADIUS * 0.5, 0, Math.PI * 2);
-      ctx.fillStyle = '#ffffff';
-      ctx.fill();
-      ctx.restore();
-    }
+  const s = scale;  // shorthand
 
-    /** Draw a player's paddle */
-    function drawPaddle(player, isMe) {
-      const { paddleX, color } = player;
-      const py = PADDLE_Y;
+  // ── Bricks ──────────────────────────────────────────────────────────────────
+  for (const b of state.bricks) {
+    if (!b.alive) continue;
+    ctx.fillStyle   = BRICK_COLORS[b.row % BRICK_COLORS.length];
+    ctx.strokeStyle = '#111';
+    ctx.lineWidth   = 1;
+    ctx.fillRect  (b.x*s,       b.y*s,       b.w*s,   b.h*s);
+    ctx.strokeRect(b.x*s + 0.5, b.y*s + 0.5, b.w*s-1, b.h*s-1);
+  }
 
-      ctx.save();
-      ctx.shadowColor = color;
-      ctx.shadowBlur  = isMe ? 18 : 8;
+  // ── Paddles ──────────────────────────────────────────────────────────────────
+  for (const id in state.players) {
+    const p    = state.players[id];
+    const isMe = id === myId;
+    ctx.fillStyle = isMe ? p.color : p.color + '88';  // others slightly transparent
+    ctx.fillRect(p.paddleX*s, PAD_Y*s, PAD_W*s, PAD_H*s);
 
-      // Paddle body
-      ctx.fillStyle   = color + (isMe ? 'cc' : '66');
-      ctx.strokeStyle = color;
-      ctx.lineWidth   = isMe ? 2 : 1;
+    // Player label above paddle
+    ctx.fillStyle  = isMe ? '#fff' : '#aaa';
+    ctx.font       = `${10 * s}px monospace`;
+    ctx.textAlign  = 'center';
+    ctx.fillText(p.name, (p.paddleX + PAD_W/2)*s, (PAD_Y - 3)*s);
+  }
 
-      // Rounded paddle
-      const r = PADDLE_H / 2;
-      ctx.beginPath();
-      ctx.moveTo(paddleX + r, py);
-      ctx.lineTo(paddleX + PADDLE_W - r, py);
-      ctx.arcTo(paddleX + PADDLE_W, py, paddleX + PADDLE_W, py + PADDLE_H, r);
-      ctx.lineTo(paddleX + r, py + PADDLE_H);
-      ctx.arcTo(paddleX, py + PADDLE_H, paddleX, py, r);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
+  // ── Ball ─────────────────────────────────────────────────────────────────────
+  const b = state.ball;
+  ctx.beginPath();
+  ctx.arc(b.x*s, b.y*s, BALL_R*s, 0, Math.PI*2);
+  ctx.fillStyle = '#fff';
+  ctx.fill();
 
-      // Player name label above paddle
-      ctx.shadowBlur  = 0;
-      ctx.fillStyle   = color;
-      ctx.font        = `10px 'Courier New'`;
-      ctx.textAlign   = 'center';
-      ctx.fillText(player.name + (isMe ? ' ◀YOU' : ''), paddleX + PADDLE_W / 2, py - 5);
+  // ── Score board (top-right) ───────────────────────────────────────────────
+  const players = Object.values(state.players);
+  ctx.font      = `${11 * s}px monospace`;
+  ctx.textAlign = 'right';
+  players.forEach((p, i) => {
+    ctx.fillStyle = p.id === myId ? p.color : '#aaa';
+    ctx.fillText(
+      p.name + ': ' + (state.scores[p.id] ?? 0),
+      (LW - 6) * s,
+      (16 + i * 14) * s
+    );
+  });
+}
 
-      ctx.restore();
-    }
-
-    /** Draw score board in top-right corner */
-    function drawScores(players, scores) {
-      const entries = Object.values(players);
-      ctx.save();
-      ctx.font      = '11px Courier New';
-      ctx.textAlign = 'right';
-      entries.forEach((p, i) => {
-        ctx.fillStyle   = p.id === myId ? p.color : p.color + '99';
-        ctx.shadowColor = p.color;
-        ctx.shadowBlur  = p.id === myId ? 6 : 0;
-        ctx.fillText(`${p.name}: ${scores[p.id] ?? 0}`, CANVAS_W - 10, 20 + i * 16);
-      });
-      ctx.restore();
-    }
-
-    /** Draw the "death line" at paddle level */
-    function drawDeathLine() {
-      ctx.save();
-      ctx.strokeStyle = '#ff003322';
-      ctx.lineWidth   = 1;
-      ctx.setLineDash([6, 4]);
-      ctx.beginPath();
-      ctx.moveTo(0, PADDLE_Y + PADDLE_H + 8);
-      ctx.lineTo(CANVAS_W, PADDLE_Y + PADDLE_H + 8);
-      ctx.stroke();
-      ctx.restore();
-    }
-
-    /** Main render loop — runs independently of socket ticks */
-    function render() {
-      requestAnimationFrame(render);
-
-      // Clear
-      ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
-
-      if (!state) {
-        // Waiting screen
-        ctx.fillStyle = '#00f5d460';
-        ctx.font      = '14px Courier New';
-        ctx.textAlign = 'center';
-        ctx.fillText('Connecting…', CANVAS_W / 2, CANVAS_H / 2);
-        return;
-      }
-
-      // Draw bricks
-      for (const brick of state.bricks) drawBrick(brick);
-
-      // Draw death line
-      drawDeathLine();
-
-      // Draw all paddles (own paddle on top)
-      const others = Object.values(state.players).filter(p => p.id !== myId);
-      const me     = state.players[myId];
-      others.forEach(p => drawPaddle(p, false));
-      if (me) drawPaddle(me, true);
-
-      // Draw ball
-      drawBall(state.ball);
-
-      // Draw scores
-      drawScores(state.players, state.scores);
-    }
-
-    render(); // kick off the render loop
-
-    // ─── Toast Helper ──────────────────────────────────────────────────────────
-    let toastTimer = null;
-    function showToast(msg) {
-      const el = document.getElementById('toast');
-      el.textContent = msg;
-      el.classList.add('show');
-      clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => el.classList.remove('show'), 2500);
-    }
-  </script>
+draw();
+</script>
 </body>
 </html>
