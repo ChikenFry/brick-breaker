@@ -43,9 +43,9 @@ const COLORS = ['#e63946', '#2a9d8f', '#e9c46a', '#457b9d', '#f4a261', '#a8dadc'
 let colorIdx = 0;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-// Divide game width equally — always visibly shorter with each new player
+// W/(n+3): single player gets ~100px, shrinks noticeably with every new joiner
 function computePadW(n) {
-  return Math.max(20, Math.floor((W - 20) / n));
+  return Math.max(20, Math.floor(W / (n + 3)));
 }
 
 // Space all paddles evenly so they never start overlapping after a resize
