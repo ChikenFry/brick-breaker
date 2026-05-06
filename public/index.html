@@ -80,9 +80,10 @@ socket.on('msg', txt => {
 // ── Paddle input ──────────────────────────────────────────────────────────────
 // Convert a CSS-pixel x position into a logical paddle X and emit it.
 function sendPaddle(cssX) {
-  // Convert CSS pixel → logical coordinate
-  const logicalX = cssX / scale - PAD_W / 2;
-  socket.emit('p', Math.max(0, Math.min(LW - PAD_W, logicalX)));
+  // Use my current padW from state if available, else fall back to init value
+  const myPadW   = state?.players?.[myId]?.padW ?? PAD_W;
+  const logicalX = cssX / scale - myPadW / 2;
+  socket.emit('p', Math.max(0, Math.min(LW - myPadW, logicalX)));
 }
 
 // Mouse (desktop fallback)
@@ -125,33 +126,47 @@ function draw() {
   // ── Bricks ──────────────────────────────────────────────────────────────────
   for (const b of state.bricks) {
     if (!b.alive) continue;
+    // Fade brick toward dark as hp drops (full brightness = full hp)
+    const hpRatio = b.maxHp > 0 ? b.hp / b.maxHp : 1;
+    ctx.globalAlpha = 0.35 + 0.65 * hpRatio;
     ctx.fillStyle   = BRICK_COLORS[b.row % BRICK_COLORS.length];
     ctx.strokeStyle = '#111';
     ctx.lineWidth   = 1;
     ctx.fillRect  (b.x*s,       b.y*s,       b.w*s,   b.h*s);
     ctx.strokeRect(b.x*s + 0.5, b.y*s + 0.5, b.w*s-1, b.h*s-1);
+    // Show remaining hits when more than 1 hit is required
+    if (b.maxHp > 1) {
+      ctx.globalAlpha = 1;
+      ctx.fillStyle   = 'rgba(255,255,255,0.9)';
+      ctx.font        = `bold ${8 * s}px monospace`;
+      ctx.textAlign   = 'center';
+      ctx.fillText(b.hp, (b.x + b.w/2)*s, (b.y + b.h * 0.72)*s);
+    }
+    ctx.globalAlpha = 1;
   }
 
   // ── Paddles ──────────────────────────────────────────────────────────────────
   for (const id in state.players) {
     const p    = state.players[id];
+    const padW = p.padW || PAD_W;
     const isMe = id === myId;
     ctx.fillStyle = isMe ? p.color : p.color + '88';  // others slightly transparent
-    ctx.fillRect(p.paddleX*s, PAD_Y*s, PAD_W*s, PAD_H*s);
+    ctx.fillRect(p.paddleX*s, PAD_Y*s, padW*s, PAD_H*s);
 
     // Player label above paddle
     ctx.fillStyle  = isMe ? '#fff' : '#aaa';
     ctx.font       = `${10 * s}px monospace`;
     ctx.textAlign  = 'center';
-    ctx.fillText(p.name, (p.paddleX + PAD_W/2)*s, (PAD_Y - 3)*s);
+    ctx.fillText(p.name, (p.paddleX + padW/2)*s, (PAD_Y - 3)*s);
   }
 
-  // ── Ball ─────────────────────────────────────────────────────────────────────
-  const b = state.ball;
-  ctx.beginPath();
-  ctx.arc(b.x*s, b.y*s, BALL_R*s, 0, Math.PI*2);
-  ctx.fillStyle = '#fff';
-  ctx.fill();
+  // ── Balls ─────────────────────────────────────────────────────────────────────
+  for (const ball of (state.balls || [])) {
+    ctx.beginPath();
+    ctx.arc(ball.x*s, ball.y*s, BALL_R*s, 0, Math.PI*2);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
+  }
 
   // ── Score board (top-right) ───────────────────────────────────────────────
   const players = Object.values(state.players);
