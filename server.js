@@ -29,7 +29,7 @@ const W          = 400;
 const H          = 600;
 const BALL_R     = 7;
 const BALL_SPEED = 4.5;
-const PAD_W      = 80;
+const PAD_W_BASE = 80;   // max paddle width for a single player
 const PAD_H      = 10;
 const PAD_Y      = H - 36;
 const BRICK_COLS = 8;
@@ -43,23 +43,25 @@ const BRICK_TOP  = 44;
 const COLORS = ['#e63946', '#2a9d8f', '#e9c46a', '#457b9d', '#f4a261', '#a8dadc'];
 let colorIdx = 0;
 
-// ── State ────────────────────────────────────────────────────────────────────
-let players = {};
-let scores  = {};
-let ball    = spawnBall();
-let bricks  = makeBricks();
+// ── Helpers ──────────────────────────────────────────────────────────────────
+// Each player's paddle shrinks so N*padW never exceeds W
+function computePadW(n) {
+  return Math.max(20, Math.min(PAD_W_BASE, Math.floor(W / n)));
+}
 
-function makeBricks() {
+function makeBricks(hp = 1) {
   const list = [];
   for (let r = 0; r < BRICK_ROWS; r++) {
     for (let c = 0; c < BRICK_COLS; c++) {
       list.push({
-        x: 10 + c * (BRICK_W + BRICK_PAD),
-        y: BRICK_TOP + r * (BRICK_H + BRICK_PAD),
-        w: BRICK_W,
-        h: BRICK_H,
+        x:     10 + c * (BRICK_W + BRICK_PAD),
+        y:     BRICK_TOP + r * (BRICK_H + BRICK_PAD),
+        w:     BRICK_W,
+        h:     BRICK_H,
         alive: true,
-        row: r
+        hp,
+        maxHp: hp,
+        row:   r
       });
     }
   }
@@ -76,82 +78,135 @@ function spawnBall() {
   };
 }
 
+// ── State ────────────────────────────────────────────────────────────────────
+let players = {};
+let scores  = {};
+let balls   = [];          // one ball per player
+let bricks  = makeBricks(1);
+
 // ── Physics ──────────────────────────────────────────────────────────────────
 function tick() {
-  if (Object.keys(players).length === 0) return;
+  const playerCount = Object.keys(players).length;
+  if (playerCount === 0) return;
 
-  ball.x += ball.vx;
-  ball.y += ball.vy;
+  for (const ball of balls) {
+    ball.x += ball.vx;
+    ball.y += ball.vy;
 
-  // Walls
-  if (ball.x - BALL_R <= 0) { ball.x = BALL_R;     ball.vx =  Math.abs(ball.vx); }
-  if (ball.x + BALL_R >= W) { ball.x = W - BALL_R; ball.vx = -Math.abs(ball.vx); }
-  if (ball.y - BALL_R <= 0) { ball.y = BALL_R;     ball.vy =  Math.abs(ball.vy); }
+    // Walls
+    if (ball.x - BALL_R <= 0) { ball.x = BALL_R;     ball.vx =  Math.abs(ball.vx); }
+    if (ball.x + BALL_R >= W) { ball.x = W - BALL_R; ball.vx = -Math.abs(ball.vx); }
+    if (ball.y - BALL_R <= 0) { ball.y = BALL_R;     ball.vy =  Math.abs(ball.vy); }
 
-  // Bricks
-  for (const b of bricks) {
-    if (!b.alive) continue;
-    if (ball.x+BALL_R > b.x && ball.x-BALL_R < b.x+b.w &&
-        ball.y+BALL_R > b.y && ball.y-BALL_R < b.y+b.h) {
-      b.alive = false;
-      ball.vy = -ball.vy;
-      for (const id in scores) scores[id]++;
-      if (bricks.every(b => !b.alive)) { bricks = makeBricks(); io.emit('msg', 'All cleared!'); }
-      break;
+    // Bricks — N hits required (hp counts down to 0)
+    for (const b of bricks) {
+      if (!b.alive) continue;
+      if (ball.x+BALL_R > b.x && ball.x-BALL_R < b.x+b.w &&
+          ball.y+BALL_R > b.y && ball.y-BALL_R < b.y+b.h) {
+        b.hp--;
+        if (b.hp <= 0) {
+          b.alive = false;
+          for (const id in scores) scores[id]++;
+          if (bricks.every(b => !b.alive)) {
+            bricks = makeBricks(playerCount);
+            io.emit('msg', 'All cleared!');
+          }
+        }
+        ball.vy = -ball.vy;
+        break;
+      }
+    }
+
+    // Paddles — use per-player padW
+    for (const id in players) {
+      const p    = players[id];
+      const padW = p.padW;
+      if (ball.vy > 0 &&
+          ball.y+BALL_R >= PAD_Y && ball.y+BALL_R <= PAD_Y+PAD_H+6 &&
+          ball.x >= p.paddleX   && ball.x <= p.paddleX+padW) {
+        const offset = (ball.x - (p.paddleX + padW/2)) / (padW/2);
+        const angle  = offset * (Math.PI / 3);
+        const spd    = Math.hypot(ball.vx, ball.vy);
+        ball.vx = Math.sin(angle) * spd;
+        ball.vy = -Math.abs(Math.cos(angle) * spd);
+        ball.y  = PAD_Y - BALL_R - 1;
+        break;
+      }
     }
   }
 
-  // Paddles
-  for (const id in players) {
-    const p = players[id];
-    if (ball.vy > 0 &&
-        ball.y+BALL_R >= PAD_Y && ball.y+BALL_R <= PAD_Y+PAD_H+6 &&
-        ball.x >= p.paddleX   && ball.x <= p.paddleX+PAD_W) {
-      const offset = (ball.x - (p.paddleX + PAD_W/2)) / (PAD_W/2);
-      const angle  = offset * (Math.PI / 3);
-      const spd    = Math.hypot(ball.vx, ball.vy);
-      ball.vx = Math.sin(angle) * spd;
-      ball.vy = -Math.abs(Math.cos(angle) * spd);
-      ball.y  = PAD_Y - BALL_R - 1;
-      break;
-    }
-  }
-
-  // Reset
-  if (ball.y - BALL_R > H) { ball = spawnBall(); io.emit('msg', 'Ball lost!'); }
+  // Drop balls that fell off screen
+  const prev = balls.length;
+  balls = balls.filter(b => b.y - BALL_R <= H);
+  if (balls.length < prev) io.emit('msg', 'Ball lost!');
+  // Always keep at least one ball in play
+  if (balls.length === 0) balls.push(spawnBall());
 }
 
 // ── Game Loop ────────────────────────────────────────────────────────────────
 setInterval(() => {
   tick();
-  io.emit('s', { ball, players, bricks, scores });
+  io.emit('s', { balls, players, bricks, scores });
 }, 1000 / 60);
 
 // ── Sockets ───────────────────────────────────────────────────────────────────
 io.on('connection', socket => {
   console.log('[+]', socket.id);
-  const num = Object.keys(players).length + 1;
+  const num      = Object.keys(players).length + 1;
+  const newCount = num;
+  const padW     = computePadW(newCount);
+
+  // Shrink all existing players' paddles to match new width
+  for (const id in players) {
+    players[id].padW    = padW;
+    players[id].paddleX = Math.min(players[id].paddleX, W - padW);
+  }
+
   players[socket.id] = {
-    id: socket.id,
-    paddleX: W/2 - PAD_W/2,
-    color: COLORS[colorIdx++ % COLORS.length],
-    name: 'P' + num
+    id:      socket.id,
+    paddleX: W/2 - padW/2,
+    padW,
+    color:   COLORS[colorIdx++ % COLORS.length],
+    name:    'P' + num
   };
   scores[socket.id] = 0;
 
-  // Send constants so client renders in correct coordinate space
-  socket.emit('init', { id: socket.id, W, H, PAD_W, PAD_H, PAD_Y, BALL_R });
+  // One extra ball per player
+  balls.push(spawnBall());
+
+  // Reset bricks so each brick now requires newCount hits
+  bricks = makeBricks(newCount);
+
+  socket.emit('init', { id: socket.id, W, H, PAD_W: padW, PAD_H, PAD_Y, BALL_R });
   io.emit('msg', players[socket.id].name + ' joined');
 
   socket.on('p', x => {
-    if (players[socket.id])
-      players[socket.id].paddleX = Math.max(0, Math.min(W - PAD_W, x));
+    if (players[socket.id]) {
+      const pw = players[socket.id].padW;
+      players[socket.id].paddleX = Math.max(0, Math.min(W - pw, x));
+    }
   });
 
   socket.on('disconnect', () => {
     const name = players[socket.id]?.name;
     delete players[socket.id];
     delete scores[socket.id];
+
+    const remaining = Object.keys(players).length;
+    if (remaining > 0) {
+      const newPadW = computePadW(remaining);
+      for (const id in players) {
+        players[id].padW    = newPadW;
+        players[id].paddleX = Math.min(players[id].paddleX, W - newPadW);
+      }
+      if (balls.length > 1) balls.pop();
+      bricks = makeBricks(remaining);
+    } else {
+      // Last player left — reset to blank slate
+      balls  = [];
+      bricks = makeBricks(1);
+    }
+
     if (name) io.emit('msg', name + ' left');
   });
 });
