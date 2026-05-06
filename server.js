@@ -29,7 +29,6 @@ const W          = 400;
 const H          = 600;
 const BALL_R     = 7;
 const BALL_SPEED = 4.5;
-const PAD_W_BASE = 80;   // max paddle width for a single player
 const PAD_H      = 10;
 const PAD_Y      = H - 36;
 const BRICK_COLS = 8;
@@ -44,9 +43,20 @@ const COLORS = ['#e63946', '#2a9d8f', '#e9c46a', '#457b9d', '#f4a261', '#a8dadc'
 let colorIdx = 0;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-// Each player's paddle shrinks so N*padW never exceeds W
+// Divide game width equally — always visibly shorter with each new player
 function computePadW(n) {
-  return Math.max(20, Math.min(PAD_W_BASE, Math.floor(W / n)));
+  return Math.max(20, Math.floor((W - 20) / n));
+}
+
+// Space all paddles evenly so they never start overlapping after a resize
+function redistributePaddles(padW) {
+  const ids = Object.keys(players);
+  const n   = ids.length;
+  ids.forEach((id, i) => {
+    const zoneW           = W / n;
+    players[id].padW    = padW;
+    players[id].paddleX = Math.round(zoneW * i + (zoneW - padW) / 2);
+  });
 }
 
 function makeBricks(hp = 1) {
@@ -156,20 +166,16 @@ io.on('connection', socket => {
   const newCount = num;
   const padW     = computePadW(newCount);
 
-  // Shrink all existing players' paddles to match new width
-  for (const id in players) {
-    players[id].padW    = padW;
-    players[id].paddleX = Math.min(players[id].paddleX, W - padW);
-  }
-
+  // Add new player with a temp position, then redistribute everyone evenly
   players[socket.id] = {
     id:      socket.id,
-    paddleX: W/2 - padW/2,
+    paddleX: 0,
     padW,
     color:   COLORS[colorIdx++ % COLORS.length],
     name:    'P' + num
   };
   scores[socket.id] = 0;
+  redistributePaddles(padW);
 
   // One extra ball per player
   balls.push(spawnBall());
@@ -181,10 +187,28 @@ io.on('connection', socket => {
   io.emit('msg', players[socket.id].name + ' joined');
 
   socket.on('p', x => {
-    if (players[socket.id]) {
-      const pw = players[socket.id].padW;
-      players[socket.id].paddleX = Math.max(0, Math.min(W - pw, x));
+    const me = players[socket.id];
+    if (!me) return;
+    const pw = me.padW;
+
+    // Clamp to walls first
+    let minX = 0;
+    let maxX = W - pw;
+
+    // Prevent overlap: find the nearest paddle on each side based on current position
+    for (const id in players) {
+      if (id === socket.id) continue;
+      const other = players[id];
+      if (other.paddleX >= me.paddleX + pw) {
+        // Other is to our right — stop before their left edge
+        maxX = Math.min(maxX, other.paddleX - pw);
+      } else if (other.paddleX + other.padW <= me.paddleX) {
+        // Other is to our left — stop at their right edge
+        minX = Math.max(minX, other.paddleX + other.padW);
+      }
     }
+
+    me.paddleX = Math.max(minX, Math.min(maxX, x));
   });
 
   socket.on('disconnect', () => {
@@ -195,10 +219,7 @@ io.on('connection', socket => {
     const remaining = Object.keys(players).length;
     if (remaining > 0) {
       const newPadW = computePadW(remaining);
-      for (const id in players) {
-        players[id].padW    = newPadW;
-        players[id].paddleX = Math.min(players[id].paddleX, W - newPadW);
-      }
+      redistributePaddles(newPadW);
       if (balls.length > 1) balls.pop();
       bricks = makeBricks(remaining);
     } else {
