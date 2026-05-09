@@ -55,9 +55,9 @@ canvas { display: block; }
 <body>
 
 <div id="joinScreen">
-  <form id="joinForm">
+  <form id="joinForm" novalidate>
     <label for="nameInput">Enter your name</label>
-    <input id="nameInput" name="name" type="text" minlength="2" maxlength="16" autocomplete="nickname" placeholder="Player name" required>
+    <input id="nameInput" name="name" type="text" maxlength="16" autocomplete="nickname" placeholder="Player name" required>
     <button id="joinBtn" type="submit">Join Game</button>
     <div id="joinHelp">Name is shown above your paddle.</div>
     <div id="joinError"></div>
@@ -81,6 +81,7 @@ const joinError = document.getElementById('joinError');
 const NAME_MIN = 2;
 const NAME_MAX = 16;
 let isJoining = false;
+let joinTimeout = null;
 
 // Logical game dimensions — filled in by server 'init' event
 let LW = 400, LH = 600;   // logical width / height
@@ -115,6 +116,8 @@ let myId  = null;
 let state = null;
 
 socket.on('init', data => {
+  clearTimeout(joinTimeout);
+  joinTimeout = null;
   myId  = data.id;
   LW    = data.W;
   LH    = data.H;
@@ -140,6 +143,8 @@ socket.on('msg', txt => {
 });
 
 socket.on('connect_error', err => {
+  clearTimeout(joinTimeout);
+  joinTimeout = null;
   isJoining = false;
   setJoinError('Failed to join: ' + err.message);
   updateJoinButton();
@@ -163,6 +168,15 @@ joinForm.addEventListener('submit', e => {
   updateJoinButton();
   socket.auth = { name };
   socket.connect();
+
+  clearTimeout(joinTimeout);
+  joinTimeout = setTimeout(() => {
+    if (!myId) {
+      isJoining = false;
+      setJoinError('Join timed out. Please try again.');
+      updateJoinButton();
+    }
+  }, 8000);
 });
 
 nameInput.addEventListener('input', () => {
@@ -188,8 +202,7 @@ function setJoinError(message) {
 }
 
 function updateJoinButton() {
-  const err = validateName(normalizeName(nameInput.value));
-  joinBtn.disabled = isJoining || Boolean(err);
+  joinBtn.disabled = isJoining;
 }
 
 // ── Paddle input ──────────────────────────────────────────────────────────────
