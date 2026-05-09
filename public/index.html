@@ -14,18 +14,73 @@
 body { background: #111; display: flex; flex-direction: column; align-items: center; touch-action: none; }
 canvas { display: block; }
 #msg { color: #fff; font: 13px monospace; height: 20px; text-align: center; padding-top: 3px; }
+#joinScreen {
+  min-height: 100vh;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font: 14px monospace;
+  padding: 16px;
+}
+#joinForm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(320px, 90vw);
+}
+#joinForm input,
+#joinForm button {
+  font: 14px monospace;
+  padding: 10px;
+  border: 1px solid #444;
+  background: #1d1d1d;
+  color: #fff;
+}
+#joinForm button {
+  cursor: pointer;
+}
+#joinHelp {
+  color: #aaa;
+  font-size: 12px;
+}
+#joinError {
+  color: #ff7b7b;
+  font-size: 12px;
+  min-height: 14px;
+}
 </style>
 </head>
 <body>
 
-<canvas id="c"></canvas>
-<div id="msg"></div>
+<div id="joinScreen">
+  <form id="joinForm">
+    <label for="nameInput">Enter your name</label>
+    <input id="nameInput" name="name" type="text" minlength="2" maxlength="16" autocomplete="nickname" placeholder="Player name" required>
+    <button id="joinBtn" type="submit">Join Game</button>
+    <div id="joinHelp">Name is shown above your paddle.</div>
+    <div id="joinError"></div>
+  </form>
+</div>
+
+<canvas id="c" hidden></canvas>
+<div id="msg" hidden></div>
 
 <script src="/socket.io/socket.io.js"></script>
 <script>
 // ── Canvas + scaling ──────────────────────────────────────────────────────────
 const canvas = document.getElementById('c');
 const ctx    = canvas.getContext('2d');
+const msgEl  = document.getElementById('msg');
+const joinScreen = document.getElementById('joinScreen');
+const joinForm = document.getElementById('joinForm');
+const nameInput = document.getElementById('nameInput');
+const joinBtn = document.getElementById('joinBtn');
+const joinError = document.getElementById('joinError');
+const NAME_MIN = 2;
+const NAME_MAX = 16;
+let isJoining = false;
 
 // Logical game dimensions — filled in by server 'init' event
 let LW = 400, LH = 600;   // logical width / height
@@ -47,9 +102,14 @@ function resize() {
 
 window.addEventListener('resize', resize);
 resize();
+nameInput.focus();
+updateJoinButton();
 
 // ── Socket ────────────────────────────────────────────────────────────────────
-const socket = io({ transports: ['websocket', 'polling'] });
+const socket = io({
+  transports: ['websocket', 'polling'],
+  autoConnect: false
+});
 
 let myId  = null;
 let state = null;
@@ -62,6 +122,9 @@ socket.on('init', data => {
   PAD_H = data.PAD_H;
   PAD_Y = data.PAD_Y;
   BALL_R = data.BALL_R;
+  joinScreen.hidden = true;
+  canvas.hidden = false;
+  msgEl.hidden = false;
   resize();   // re-scale now we know real dimensions
 });
 
@@ -71,15 +134,68 @@ socket.on('s', s => { state = s; });
 // Toast message
 let msgTimer;
 socket.on('msg', txt => {
-  const el = document.getElementById('msg');
-  el.textContent = txt;
+  msgEl.textContent = txt;
   clearTimeout(msgTimer);
-  msgTimer = setTimeout(() => { el.textContent = ''; }, 2500);
+  msgTimer = setTimeout(() => { msgEl.textContent = ''; }, 2500);
 });
+
+socket.on('connect_error', err => {
+  isJoining = false;
+  setJoinError('Failed to join: ' + err.message);
+  updateJoinButton();
+  msgEl.hidden = false;
+  msgEl.textContent = '';
+});
+
+joinForm.addEventListener('submit', e => {
+  e.preventDefault();
+  const name = normalizeName(nameInput.value);
+  const err = validateName(name);
+  if (err) {
+    setJoinError(err);
+    updateJoinButton();
+    nameInput.focus();
+    return;
+  }
+  nameInput.value = name;
+  setJoinError('');
+  isJoining = true;
+  updateJoinButton();
+  socket.auth = { name };
+  socket.connect();
+});
+
+nameInput.addEventListener('input', () => {
+  const name = normalizeName(nameInput.value);
+  const err = validateName(name);
+  setJoinError(err);
+  updateJoinButton();
+});
+
+function normalizeName(value) {
+  return (value || '').replace(/\s+/g, ' ').trim();
+}
+
+function validateName(name) {
+  if (!name) return 'Name is required.';
+  if (name.length < NAME_MIN) return 'Name must be at least 2 characters.';
+  if (name.length > NAME_MAX) return 'Name must be 16 characters or fewer.';
+  return '';
+}
+
+function setJoinError(message) {
+  joinError.textContent = message;
+}
+
+function updateJoinButton() {
+  const err = validateName(normalizeName(nameInput.value));
+  joinBtn.disabled = isJoining || Boolean(err);
+}
 
 // ── Paddle input ──────────────────────────────────────────────────────────────
 // Convert a CSS-pixel x position into a logical paddle X and emit it.
 function sendPaddle(cssX) {
+  if (!myId) return;
   // Use my current padW from state if available, else fall back to init value
   const myPadW   = state?.players?.[myId]?.padW ?? PAD_W;
   const logicalX = cssX / scale - myPadW / 2;

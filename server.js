@@ -88,6 +88,26 @@ function spawnBall() {
   };
 }
 
+function sanitizeName(input, fallbackNum) {
+  const raw = typeof input === 'string' ? input : '';
+  const cleaned = raw.replace(/\s+/g, ' ').trim().slice(0, 16);
+  return cleaned || ('P' + fallbackNum);
+}
+
+function isNameTaken(name) {
+  const target = String(name).toLowerCase();
+  return Object.values(players).some(p => p.name.toLowerCase() === target);
+}
+
+function makeUniqueName(name) {
+  if (!isNameTaken(name)) return name;
+  for (let i = 2; i < 1000; i++) {
+    const candidate = (name + ' ' + i).slice(0, 16).trim();
+    if (!isNameTaken(candidate)) return candidate;
+  }
+  return ('P' + Date.now()).slice(-6);
+}
+
 // ── State ────────────────────────────────────────────────────────────────────
 let players = {};
 let scores  = {};
@@ -165,6 +185,8 @@ io.on('connection', socket => {
   const num      = Object.keys(players).length + 1;
   const newCount = num;
   const padW     = computePadW(newCount);
+  const requestedName = sanitizeName(socket.handshake.auth?.name, num);
+  const playerName = makeUniqueName(requestedName);
 
   // Add new player with a temp position, then redistribute everyone evenly
   players[socket.id] = {
@@ -172,7 +194,7 @@ io.on('connection', socket => {
     paddleX: 0,
     padW,
     color:   COLORS[colorIdx++ % COLORS.length],
-    name:    'P' + num
+    name:    playerName
   };
   scores[socket.id] = 0;
   redistributePaddles(padW);
@@ -184,6 +206,9 @@ io.on('connection', socket => {
   bricks = makeBricks(newCount);
 
   socket.emit('init', { id: socket.id, W, H, PAD_W: padW, PAD_H, PAD_Y, BALL_R });
+  if (playerName !== requestedName) {
+    socket.emit('msg', 'Name already used. Joined as ' + playerName + '.');
+  }
   io.emit('msg', players[socket.id].name + ' joined');
 
   socket.on('p', x => {
